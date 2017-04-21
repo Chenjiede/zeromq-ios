@@ -19,11 +19,14 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    [[ZMQREQ shareInstance] startRequest:@{@"name" : @"chen"} success:^(id data) {
+    ZMQREQ *task = [ZMQREQ startRequest:@{@"name" : @"chen"} success:^(id data) {
         NSLog(@"%@", data);
     } failure:^(NSError *error) {
         NSLog(@"失败");
     }];
+    
+    // 取消任务
+    [task cancle];
 }
 
 @end

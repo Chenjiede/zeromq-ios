@@ -6,6 +6,7 @@
 //  Copyright © 2017年 ITC. All rights reserved.
 //
 
+
 #import "ZMQREQ.h"
 
 #import "ZMQObjC.h"
@@ -14,24 +15,23 @@ typedef void(^successType)(id data);
 typedef void (^failureType)(NSError *error);
 
 @interface ZMQREQ ()
+{
+@private
+    BOOL _isCancle;
+}
+@property (copy, nonatomic) successType successBlock;
 
-@property (strong, nonatomic) ZMQContext *context;
-
-@property (strong, nonatomic) NSMutableArray *sockets;
-
-@property (strong, nonatomic) NSThread *thread;
-
-@property (strong, nonatomic) NSMutableDictionary *successDict;
-
-@property (strong, nonatomic) NSMutableDictionary *failureDict;
-
+@property (copy, nonatomic) failureType failureBlock;
 @end
 
 @implementation ZMQREQ
 
+#pragma mark - 类方法
+static ZMQContext *_context;
+static NSMutableArray *_sockets;
+static NSString *_ipCla;
 
-#pragma mark - 懒加载
-- (ZMQContext *)context {
++ (ZMQContext *)context {
     if (_context == nil) {
         _context = [[ZMQContext alloc] initWithIOThreads:1];
     }
@@ -39,7 +39,7 @@ typedef void (^failureType)(NSError *error);
     return _context;
 }
 
-- (NSMutableArray *)sockets {
++ (NSMutableArray *)sockets {
     if (_sockets == nil) {
         _sockets = [NSMutableArray array];
     }
@@ -47,41 +47,24 @@ typedef void (^failureType)(NSError *error);
     return _sockets;
 }
 
-- (NSThread *)thread {
-    if (_thread == nil) {
-        _thread = [[NSThread alloc] initWithTarget:self selector:@selector(backgroundThread) object:nil];
-        _thread.name = @"zmqREQ";
-        [_thread start];
-    }
++ (NSThread *)thread {
     
-    return _thread;
+    static NSThread *thread = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        thread = [[NSThread alloc] initWithTarget:self selector:@selector(zmqREQThreadMain) object:nil];
+        
+        thread.name = @"zmqREQ";
+        [thread start];
+    });
+    return thread;
 }
 
-- (NSMutableDictionary *)successDict {
-    if (_successDict == nil) {
-        _successDict = [NSMutableDictionary dictionary];
-    }
-    
-    return _successDict;
-}
-
-- (NSMutableDictionary *)failureDict {
-    if (_failureDict == nil) {
-        _failureDict = [NSMutableDictionary dictionary];
-    }
-    
-    return _failureDict;
-}
-
-#pragma mark - runloop
-/// 启动子线程，并激活RunLoop
-- (void)backgroundThread {
-    
++ (void)zmqREQThreadMain {
     @autoreleasepool {
         NSThread *currentThread = [NSThread currentThread];
         BOOL isCancelled = [currentThread isCancelled];
-        
-        NSLog(@"start -- %@", currentThread);
+        NSLog(@"start - %@", currentThread);
         NSRunLoop *currentRunLoop = [NSRunLoop currentRunLoop];
         
         // 开启runloop
@@ -91,35 +74,32 @@ typedef void (^failureType)(NSError *error);
             isCancelled = [currentThread isCancelled];
         }
         
-        // 结束线程
-        NSLog(@"end -- %@", currentThread);
+        NSLog(@"end - %@", currentThread);
     }
     
 }
 
-/// 让子线程执行发送的请求
-- (void)requestInThread:(id)params {
++ (void)setupDomainIP:(NSString *)ip {
+    _ipCla = ip;
+}
+
+#pragma mark - runloop
+- (void)requestInThread:(NSDictionary *)params {
     NSThread *currentThread = [NSThread currentThread];
     
     // 判断线程是否已经取消
-    if (currentThread.isCancelled) { return; }
+    if (currentThread.isCancelled || _isCancle) { return; }
     
     // 获取缓存数组中的socket
-    ZMQSocket *socket = self.sockets.lastObject;
-    [self.sockets removeLastObject];
-    
-    // 获取block
-    NSString *key = [params description];
-    successType success = self.successDict[key];
-    [self.successDict removeObjectForKey:key];
-    failureType failure = self.failureDict[key];
-    [self.failureDict removeObjectForKey:key];
+    ZMQSocket *socket = [ZMQREQ sockets].lastObject;
+    [[ZMQREQ sockets] removeLastObject];
     
     if (socket == nil) {
-        socket = [self.context socketWithType:ZMQ_REQ];
-        socket.loadingtime = 5000;
+        socket = [[ZMQREQ context] socketWithType:ZMQ_REQ];
+        socket.loadingtime = 8000;
         
-        NSString *endpoint = @"tcp://localhost:5555"; // 服务器IP地址
+        NSAssert(_ipCla.length != 0 || _ip.length != 0 , @"没有设置服务器的IP地址");
+        NSString *endpoint = _ip.length > 0 ? _ip : _ipCla;
         if (![socket connectToEndpoint:endpoint]) {
             NSLog(@"监听失败");
             
@@ -136,9 +116,11 @@ typedef void (^failureType)(NSError *error);
         NSLog(@"发送失败");
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (failure) {
-                failure(nil);
+            if (_failureBlock) {
+                _failureBlock(nil);
             }
+            
+            _failureBlock = nil;
         });
         
     }else{
@@ -146,21 +128,23 @@ typedef void (^failureType)(NSError *error);
         
         NSData *reply = [socket receiveDataWithFlags:0]; // 阻塞当前线程，直到有数据返回
         // 判断线程是否已经取消
-        if (currentThread.isCancelled) { return; }
+        if (currentThread.isCancelled || _isCancle) { return; }
         
         id data = nil;
         if (reply) {
             data = [NSJSONSerialization JSONObjectWithData:reply options:0 error:nil];
-            [self.sockets addObject:socket];
+            [[ZMQREQ sockets] addObject:socket];
         } else {
             [socket close];
             socket = nil;
         }
         
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (success) {
-                success(data);
+            if (_successBlock) {
+                _successBlock(data);
             }
+            
+            _successBlock = nil;
         });
     }
     
@@ -170,55 +154,39 @@ typedef void (^failureType)(NSError *error);
 - (void)closeThread {}
 
 #pragma mark - 外部接口方法
-- (void)close {
-    [_thread cancel];
++ (void)close {
+    [[ZMQREQ thread] cancel];
     
-    [self performSelector:@selector(closeThread) onThread:_thread withObject:nil waitUntilDone:NO];
+    [self performSelector:@selector(closeThread) onThread:[ZMQREQ thread] withObject:nil waitUntilDone:NO];
     
     // 清空资源
-    [self.sockets removeAllObjects];
-    self.sockets = nil;
+    [[ZMQREQ sockets] removeAllObjects];
     
-    [self.context closeSockets];
-    [self.context terminate];
-    
-    [self.successDict removeAllObjects];
-    self.successDict = nil;
-    
-    [self.failureDict removeAllObjects];
-    self.failureDict = nil;
+    [[ZMQREQ context] closeSockets];
+    [[ZMQREQ context] terminate];
 }
 
-- (void)startRequest:(id)params success:(void (^)(id))success failure:(void (^)(NSError *))failure {
-    if (params == nil) return;
+- (void)startRequest:(NSDictionary *)params success:(void (^)(id))success failure:(void (^)(NSError *))failure {
+    // 判断线程是否已经关闭
+    if ([ZMQREQ thread].isCancelled) return;
     
-    NSString *key = [params description];
     // 先保存block
-    if (success != nil) {
-        [self.successDict setObject:success forKey:key];
-    }
-    if (failure != nil) {
-        [self.failureDict setObject:failure forKey:key];
-    }
+    _successBlock = success;
+    _failureBlock = failure;
     
     // 异步请求
-    [self performSelector:@selector(requestInThread:) onThread:self.thread withObject:params waitUntilDone:NO];
+    [self performSelector:@selector(requestInThread:) onThread:[ZMQREQ thread] withObject:params waitUntilDone:NO];
 }
 
-#pragma mark - 单例
-+(instancetype)shareInstance {return [[self alloc]init];}
-
-+ (instancetype)allocWithZone:(struct _NSZone *)zone {
-    static id instance;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [super allocWithZone:zone];
-    });
-    return instance;
++ (instancetype)startRequest:(NSDictionary *)params success:(void (^)(id))success failure:(void (^)(NSError *))failure {
+    ZMQREQ *zmq = [[ZMQREQ alloc] init];
+    
+    [zmq startRequest:params success:success failure:failure];
+    
+    return zmq;
 }
 
-- (id)copyWithZone:(NSZone *)zone{return self;}
-
-- (id)mutableCopyWithZone:(NSZone *)zone {return self;}
-
+- (void)cancle {
+    _isCancle = YES;
+}
 @end

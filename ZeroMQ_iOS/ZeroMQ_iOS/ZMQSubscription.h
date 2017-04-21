@@ -45,7 +45,4 @@
 - (void)stop;
 
 +(_Nonnull instancetype)shareInstance;
-
-/// 音乐状态下的会话任务监听对象
-//@property (weak, nonatomic) id<ZMQSubscriptionDelegate> musicDelegate;
 @end

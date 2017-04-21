@@ -10,11 +10,11 @@
 
 #import "ZMQObjC.h"
 
-NSString* const Endpoint_status_msg = @"Endpoint_status_msg";
+NSString* const codeKeyOne = @"codeKeyOne";
 
-NSString* const Task_status_msg = @"Task_status_msg";
+NSString* const codeKeyTwo = @"codeKeyTwo";
 
-NSString* const Remote_music_status_msg = @"Remote_music_status_msg";
+NSString* const codeKeyThree = @"codeKeyThree";
 
 @interface ZMQSubscription ()
 
@@ -36,7 +36,6 @@ NSString* const Remote_music_status_msg = @"Remote_music_status_msg";
 - (NSMutableDictionary *)delegates {
     if (_delegates == nil) {
         _delegates = [[NSMutableDictionary alloc] init];
-        _delegates[Task_status_msg] = [[NSMutableDictionary alloc] init];
     }
     
     return _delegates;
@@ -62,31 +61,34 @@ static BOOL closeSocket = NO;
 
 #pragma mark - 修改后的方法
 - (void)setCode:(NSString *)code withDelegate:(id<ZMQSubscriptionDelegate>)delegate {
+    NSAssert(delegate != nil, @"代理为空");
+    NSAssert(code != nil, @"订阅码为空");
     
-    NSAssert(delegate == nil, @"代理为空");
-    NSAssert(code == nil, @"订阅码为空");
+    // 取出当前订阅码的代理字典
+    NSMutableDictionary *delegateDict = self.delegates[code];
     
-    // 订阅码的类型
-    if (code == Task_status_msg) { // 会话信息
-        NSString *key = [NSString stringWithFormat:@"%ld", (unsigned long)[delegate hash]];
-        NSMutableDictionary *tasks = self.delegates[Task_status_msg];
-        tasks[key] = delegate;
-        return;
+    if (delegateDict == nil) { // 不存在当前的订阅码代理对象
+        // 创建当前订阅码的代理对象的字典
+        delegateDict = [NSMutableDictionary dictionary];
+        self.delegates[code] = delegateDict;
     }
     
-    self.delegates[code] = delegate;
+    // 添加代理对象
+    NSString *key = [NSString stringWithFormat:@"%ld", (unsigned long)[delegate hash]];
+    delegateDict[key] = delegate;
 }
 
 - (void)removeDelegate:(NSString *)code withDelegate:(id<ZMQSubscriptionDelegate>)delegate {
-    // 订阅码的类型
-    if (code == Task_status_msg) { // 会话信息
-        NSString *key = [NSString stringWithFormat:@"%ld", (unsigned long)[delegate hash]];
-        NSMutableDictionary *tasks = self.delegates[Task_status_msg];
-        [tasks removeObjectForKey:key];
-        return;
-    }
+    NSAssert(delegate != nil, @"代理为空");
+    NSAssert(code != nil, @"订阅码为空");
     
-    [self.delegates removeObjectForKey:code];
+    // 取出当前订阅码的代理字典
+    NSMutableDictionary *delegateDict = self.delegates[code];
+    
+    if (delegateDict == nil) return; // 不存在当前的订阅码代理对象
+    
+    NSString *key = [NSString stringWithFormat:@"%ld", (unsigned long)[delegate hash]];
+    [delegateDict removeObjectForKey:key];
 }
 
 
@@ -126,11 +128,7 @@ static BOOL closeSocket = NO;
 }
 
 - (void)stop {
-    // 判断是否需要重启socket
-    id delegate = self.delegates[Endpoint_status_msg];
-    if (delegate) {
-        closeSocket = YES;
-    }
+    closeSocket = YES;
 }
 
 #pragma mark - 使用可控线程来操作
@@ -141,7 +139,6 @@ static BOOL closeSocket = NO;
     _socket = [_context socketWithType:ZMQ_SUB];
     _socket.loadingtime = 3000;
 
-    
     NSString *endpoint = @"tcp://:41204"; // 服务器IP地址
     if (![_socket connectToEndpoint:endpoint]) {
         NSLog(@"订阅失败");
@@ -159,7 +156,7 @@ static BOOL closeSocket = NO;
         
         @autoreleasepool {
             NSData *recieveData = [_socket receiveDataWithFlags:0];
-            if (recieveData == nil)  continue;
+            if (recieveData == nil)  continue; // 订阅消息超时返回nil
             
             // 数据处理
             NSString *dataStr = [[NSString alloc] initWithData:recieveData encoding:NSUTF8StringEncoding];
@@ -168,24 +165,15 @@ static BOOL closeSocket = NO;
             NSString *codeKey = [dataStr substringToIndex:range.location];
             
             /*** 数据分发 ***/
-            // 订阅码的类型
-            if (codeKey == Task_status_msg) { // 会话信息
-                NSDictionary *tasks = self.delegates[codeKey];
-                
-                [tasks enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id<ZMQSubscriptionDelegate>  _Nonnull obj, BOOL * _Nonnull stop) {
-                    
-                    [self handleData:subStr delegate:obj code:Task_status_msg];
-                }];
-                
-            } else {
-                
-                id<ZMQSubscriptionDelegate> delegate = self.delegates[codeKey];
-                if (delegate) {
-                    
-                    [self handleData:subStr delegate:delegate code:codeKey];
-                }
-            }
+            // 取出当前订阅码的代理字典
+            NSMutableDictionary *delegateDict = self.delegates[codeKey];
             
+            if (delegateDict == nil) continue; // 没有对当前订阅码的代理对象
+            
+            [delegateDict enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull obj, BOOL * _Nonnull stop) {
+                
+                [self handleData:subStr delegate:obj code:codeKey];
+            }];
         }
         
     }
